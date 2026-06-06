@@ -1,5 +1,7 @@
 # gccli — Garmin Connect in your terminal.
 
+> **Note:** This is a fork of the original [bpauli/gccli](https://github.com/bpauli/gccli) repository. It includes new features like workout repetitions and distance targets.
+
 [![ci](https://github.com/bpauli/gccli/actions/workflows/ci.yml/badge.svg)](https://github.com/bpauli/gccli/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/bpauli/gccli)](https://goreportcard.com/report/github.com/bpauli/gccli)
 [![Docs](https://img.shields.io/badge/docs-gccli.sh-blue)](https://gccli.sh)
@@ -13,7 +15,7 @@ Fast, script-friendly CLI for Garmin Connect. Access activities, health data, bo
 - **Exercise Catalog** — browse Garmin's exercise categories and exercises for strength training
 - **Health Data** — daily summaries, steps, heart rate, resting HR, sleep, stress, HRV, SpO2, respiration, body battery, floors, training readiness/status, VO2max, fitness age, race predictions, endurance/hill scores, intensity minutes, lactate threshold, cycling FTP
 - **Body Composition** — weight tracking, body fat, muscle mass, blood pressure, FIT file encoding for composition uploads
-- **Workouts** — list, view, download as FIT, upload from JSON, create with sport types and targets (pace/HR/power/cadence), schedule (add/list/remove), delete
+- **Workouts** — list, view, download as FIT, upload from JSON, create with sport types, targets (pace/HR/power/cadence), distances, and repetitions, schedule (add/list/remove), delete
 - **Courses** — list courses, view favorites, get full course detail, import GPX files as new courses, send courses directly to a device, delete courses
 - **Devices** — list registered devices, view settings, solar data, alarms, primary/last-used device
 - **Gear** — list gear, usage stats, linked activities, defaults per activity type, link/unlink to activities
@@ -44,7 +46,7 @@ brew install bpauli/tap/gccli
 Requires Go 1.24+.
 
 ```bash
-git clone https://github.com/bpauli/gccli.git
+git clone https://github.com/EduardoPanero/gccli.git
 cd gccli
 make build
 ```
@@ -373,36 +375,42 @@ gccli workouts delete <id>
 
 # Create a running workout with pace targets
 gccli workouts create "Easy 30min Run" --type run \
-  --step "warmup:5m@pace:5:30-6:00" \
-  --step "run:20m@pace:5:00-5:30" \
-  --step "cooldown:5m"
+  --step "warmup:5min@pace:5:30-6:00" \
+  --step "run:20min@pace:5:00-5:30" \
+  --step "cooldown:5min"
 
 # Running with heart rate targets
 gccli workouts create "HR Zone Run" --type run \
-  --step "warmup:10m" \
-  --step "run:20m@hr:140-160" \
-  --step "cooldown:10m"
+  --step "warmup:10min" \
+  --step "run:20min@hr:140-160" \
+  --step "cooldown:10min"
 
 # Cycling with power targets
 gccli workouts create "FTP Intervals" --type bike \
-  --step "warmup:10m" \
-  --step "run:5m@power:250-280" \
-  --step "recovery:3m" \
-  --step "run:5m@power:250-280" \
-  --step "cooldown:10m"
+  --step "warmup:10min" \
+  --step "run:5min@power:250-280" \
+  --step "recovery:3min" \
+  --step "run:5min@power:250-280" \
+  --step "cooldown:10min"
 
 # Imperial paces (miles)
 gccli workouts create "Easy 30min Run" --type run \
-  --step "warmup:5m@pace:8:51-9:39" \
-  --step "run:20m@pace:8:03-8:51" \
-  --step "cooldown:5m" \
+  --step "warmup:5min@pace:8:51-9:39" \
+  --step "run:20min@pace:8:03-8:51" \
+  --step "cooldown:5min" \
   --unit mi
 
 # Strength workout (no targets)
 gccli workouts create "Full Body" --type strength \
-  --step "warmup:5m" \
-  --step "run:30m" \
-  --step "cooldown:5m"
+  --step "warmup:5min" \
+  --step "run:30min" \
+  --step "cooldown:5min"
+
+# Track workout with repetitions and distance
+gccli workouts create "Track 8x400" --type run \
+  --step "warmup:10min" \
+  --step "repeat:8:run:400m@pace:3:30-4:00+recovery:1min" \
+  --step "cooldown:10min"
 ```
 
 **Workout JSON structure** for `gccli workouts upload`:
