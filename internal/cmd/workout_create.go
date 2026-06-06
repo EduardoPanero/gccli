@@ -20,16 +20,21 @@ const (
 type WorkoutCreateCmd struct {
 	Name  string   `arg:"" help:"Workout name."`
 	Type  string   `help:"Sport type." required:"" enum:"run,bike,swim,strength,cardio,hiit,yoga,pilates,mobility,multisport,custom"`
-	Steps []string `help:"Workout step (type:duration[@target:values])." required:"" short:"s" name:"step"`
+	Steps []string `help:"Workout step (type:condition[@target:values] or repeat:iters:step1+step2). Condition = time (5min, 1min30s) or distance (400m, 1km, 1.5mi)." required:"" short:"s" name:"step"`
 	Unit  string   `help:"Pace unit: km or mi." default:"km" enum:"km,mi"`
 }
 
 type workoutStep struct {
-	stepType       string
-	durationSecs   float64
-	targetType     string  // "pace", "hr", "power", "cadence", or "" for no target
-	targetValueOne float64 // higher/faster value
-	targetValueTwo float64 // lower/slower value
+	isRepeat   bool
+	iterations int
+	steps      []workoutStep
+
+	stepType          string
+	endConditionType  string // "time" or "distance"
+	endConditionValue float64 // seconds or meters
+	targetType        string  // "pace", "hr", "power", "cadence", or "" for no target
+	targetValueOne    float64 // higher/faster value
+	targetValueTwo    float64 // lower/slower value
 }
 
 var stepTypeMap = map[string]struct {
@@ -72,8 +77,11 @@ var targetTypeMap = map[string]struct {
 	"cadence": {3, "cadence"},
 }
 
-// durationRegexp matches durations like "1m", "30s", "1m30s".
-var durationRegexp = regexp.MustCompile(`^(?:(\d+)m)?(?:(\d+)s)?$`)
+// mixedTimeRegexp matches mixed time like "1min30s" or "30seg".
+var mixedTimeRegexp = regexp.MustCompile(`^(?:(\d+)min)?(?:(\d+)(?:s|seg))$`)
+
+// singleUnitRegexp matches single units like "1km", "400m", "5mi", "5min".
+var singleUnitRegexp = regexp.MustCompile(`^([0-9.]+)(km|mi|m|mt|mts|min)$`)
 
 // paceRegexp matches pace like "5:30".
 var paceRegexp = regexp.MustCompile(`^(\d+):(\d{2})$`)
@@ -128,6 +136,40 @@ func parseSteps(raw []string, unit string) ([]workoutStep, error) {
 }
 
 func parseStep(s string, unit string) (workoutStep, error) {
+	if strings.HasPrefix(s, "repeat:") {
+		parts := strings.SplitN(s, ":", 3)
+		if len(parts) != 3 {
+			return workoutStep{}, fmt.Errorf("invalid repeat step %q: expected repeat:iterations:step1+step2", s)
+		}
+		iters, err := strconv.Atoi(parts[1])
+		if err != nil || iters <= 0 {
+			return workoutStep{}, fmt.Errorf("invalid repeat iterations %q", parts[1])
+		}
+
+		innerStepStrs := strings.Split(parts[2], "+")
+		var innerSteps []workoutStep
+		for _, is := range innerStepStrs {
+			inner, err := parseStep(is, unit)
+			if err != nil {
+				return workoutStep{}, fmt.Errorf("in repeat: %w", err)
+			}
+			if inner.isRepeat {
+				return workoutStep{}, fmt.Errorf("nested repeats are not supported")
+			}
+			innerSteps = append(innerSteps, inner)
+		}
+
+		if len(innerSteps) == 0 {
+			return workoutStep{}, fmt.Errorf("repeat must have at least one step")
+		}
+
+		return workoutStep{
+			isRepeat:   true,
+			iterations: iters,
+			steps:      innerSteps,
+		}, nil
+	}
+
 	// Split on first "@" to separate step part from optional target part.
 	stepPart, targetPart, _ := strings.Cut(s, "@")
 
@@ -141,14 +183,15 @@ func parseStep(s string, unit string) (workoutStep, error) {
 		return workoutStep{}, fmt.Errorf("invalid step type %q: expected warmup, run, interval, cooldown, recovery, rest, or other", typeName)
 	}
 
-	dur, err := parseStepDuration(durStr)
+	condType, condVal, err := parseCondition(durStr)
 	if err != nil {
 		return workoutStep{}, fmt.Errorf("invalid step %q: %w", s, err)
 	}
 
 	step := workoutStep{
-		stepType:     typeName,
-		durationSecs: dur,
+		stepType:          typeName,
+		endConditionType:  condType,
+		endConditionValue: condVal,
 	}
 
 	if targetPart != "" {
@@ -184,31 +227,51 @@ func parseStep(s string, unit string) (workoutStep, error) {
 	return step, nil
 }
 
-func parseStepDuration(s string) (float64, error) {
+func parseCondition(s string) (string, float64, error) {
 	if s == "" {
-		return 0, fmt.Errorf("empty duration")
+		return "", 0, fmt.Errorf("empty condition")
 	}
 
-	m := durationRegexp.FindStringSubmatch(s)
-	if m == nil {
-		return 0, fmt.Errorf("invalid duration %q: expected format like 1m, 30s, or 1m30s", s)
+	// Check if it's mixed time like 1m30s or 30s
+	if m := mixedTimeRegexp.FindStringSubmatch(s); m != nil {
+		var total float64
+		if m[1] != "" {
+			mins, _ := strconv.ParseFloat(m[1], 64)
+			total += mins * 60
+		}
+		if m[2] != "" {
+			secs, _ := strconv.ParseFloat(m[2], 64)
+			total += secs
+		}
+		if total == 0 {
+			return "", 0, fmt.Errorf("time must be greater than zero")
+		}
+		return "time", total, nil
 	}
 
-	var total float64
-	if m[1] != "" {
-		mins, _ := strconv.ParseFloat(m[1], 64)
-		total += mins * 60
-	}
-	if m[2] != "" {
-		secs, _ := strconv.ParseFloat(m[2], 64)
-		total += secs
+	// Check single unit
+	if m := singleUnitRegexp.FindStringSubmatch(s); m != nil {
+		v, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid value %q", m[1])
+		}
+		if v <= 0 {
+			return "", 0, fmt.Errorf("value must be greater than zero")
+		}
+
+		switch m[2] {
+		case "km":
+			return "distance", v * 1000.0, nil
+		case "mi":
+			return "distance", v * 1609.344, nil
+		case "m", "mt", "mts":
+			return "distance", v, nil
+		case "min":
+			return "time", v * 60.0, nil
+		}
 	}
 
-	if total == 0 {
-		return 0, fmt.Errorf("duration must be greater than zero")
-	}
-
-	return total, nil
+	return "", 0, fmt.Errorf("invalid condition %q: expected format like 1km, 400m, 5mi, 5min, 1m30s", s)
 }
 
 // parseNumericRange parses "140-160" into (140.0, 160.0).
@@ -313,41 +376,31 @@ func buildWorkoutJSON(name string, sportType string, steps []workoutStep) (json.
 	workoutSteps := make([]map[string]any, 0, len(steps))
 
 	for i, s := range steps {
-		st, ok := stepTypeMap[s.stepType]
-		if !ok {
-			return nil, fmt.Errorf("unknown step type: %s", s.stepType)
-		}
-
-		step := map[string]any{
-			"type":      "ExecutableStepDTO",
-			"stepOrder": i + 1,
-			"stepType": map[string]any{
-				"stepTypeId":  st.id,
-				"stepTypeKey": st.key,
-			},
-			"endCondition": map[string]any{
-				"conditionTypeId":  2,
-				"conditionTypeKey": "time",
-			},
-			"endConditionValue": s.durationSecs,
-		}
-
-		if s.targetType != "" {
-			tt := targetTypeMap[s.targetType]
-			step["targetType"] = map[string]any{
-				"workoutTargetTypeId":  tt.id,
-				"workoutTargetTypeKey": tt.key,
+		if s.isRepeat {
+			repeatSteps := make([]map[string]any, 0, len(s.steps))
+			for j, rs := range s.steps {
+				rsObj, err := buildExecutableStep(rs, j+1)
+				if err != nil {
+					return nil, err
+				}
+				repeatSteps = append(repeatSteps, rsObj)
 			}
-			step["targetValueOne"] = s.targetValueOne
-			step["targetValueTwo"] = s.targetValueTwo
+
+			stepObj := map[string]any{
+				"type":               "RepeatGroupDTO",
+				"stepOrder":          i + 1,
+				"numberOfIterations": s.iterations,
+				"workoutSteps":       repeatSteps,
+				"smartRepeat":        false,
+			}
+			workoutSteps = append(workoutSteps, stepObj)
 		} else {
-			step["targetType"] = map[string]any{
-				"workoutTargetTypeId":  1,
-				"workoutTargetTypeKey": "no.target",
+			stepObj, err := buildExecutableStep(s, i+1)
+			if err != nil {
+				return nil, err
 			}
+			workoutSteps = append(workoutSteps, stepObj)
 		}
-
-		workoutSteps = append(workoutSteps, step)
 	}
 
 	payload := map[string]any{
@@ -368,4 +421,50 @@ func buildWorkoutJSON(name string, sportType string, steps []workoutStep) (json.
 	}
 
 	return json.RawMessage(data), nil
+}
+
+func buildExecutableStep(s workoutStep, order int) (map[string]any, error) {
+	st, ok := stepTypeMap[s.stepType]
+	if !ok {
+		return nil, fmt.Errorf("unknown step type: %s", s.stepType)
+	}
+
+	step := map[string]any{
+		"type":      "ExecutableStepDTO",
+		"stepOrder": order,
+		"stepType": map[string]any{
+			"stepTypeId":  st.id,
+			"stepTypeKey": st.key,
+		},
+		"endConditionValue": s.endConditionValue,
+	}
+
+	if s.endConditionType == "time" {
+		step["endCondition"] = map[string]any{
+			"conditionTypeId":  2,
+			"conditionTypeKey": "time",
+		}
+	} else if s.endConditionType == "distance" {
+		step["endCondition"] = map[string]any{
+			"conditionTypeId":  3,
+			"conditionTypeKey": "distance",
+		}
+	}
+
+	if s.targetType != "" {
+		tt := targetTypeMap[s.targetType]
+		step["targetType"] = map[string]any{
+			"workoutTargetTypeId":  tt.id,
+			"workoutTargetTypeKey": tt.key,
+		}
+		step["targetValueOne"] = s.targetValueOne
+		step["targetValueTwo"] = s.targetValueTwo
+	} else {
+		step["targetType"] = map[string]any{
+			"workoutTargetTypeId":  1,
+			"workoutTargetTypeKey": "no.target",
+		}
+	}
+
+	return step, nil
 }
