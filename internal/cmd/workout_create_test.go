@@ -120,10 +120,21 @@ func TestParseNumericRange(t *testing.T) {
 }
 
 func TestParseStep(t *testing.T) {
+	mockCat := &exerciseCatalog{
+		Categories: map[string]exerciseCategory{
+			"BENCH_PRESS": {
+				Exercises: map[string]exerciseInfo{
+					"BARBELL_BENCH_PRESS": {},
+				},
+			},
+		},
+	}
+
 	tests := []struct {
 		name    string
 		input   string
 		unit    string
+		catalog *exerciseCatalog
 		wantErr bool
 		check   func(t *testing.T, s workoutStep)
 	}{
@@ -336,13 +347,62 @@ func TestParseStep(t *testing.T) {
 			input: "repeat:3:run:10min@hr:150-170+rest:1min",
 			unit:  "km",
 			check: func(t *testing.T, s workoutStep) {
-				if s.stepType != "repeat" {
-					t.Errorf("stepType = %q, want repeat", s.stepType)
+				if !s.isRepeat {
+					t.Errorf("isRepeat = %v, want true", s.isRepeat)
 				}
-				if s.targetType != "hr" {
-					t.Errorf("targetType = %q, want hr", s.targetType)
+				if s.iterations != 3 {
+					t.Errorf("iterations = %v, want 3", s.iterations)
+				}
+				if len(s.steps) != 2 {
+					t.Errorf("len(steps) = %v, want 2", len(s.steps))
 				}
 			},
+		},
+		{
+			name:    "strength exercise with reps and weight",
+			input:   "BENCH_PRESS/BARBELL_BENCH_PRESS:10reps@weight:20kg",
+			unit:    "km",
+			catalog: mockCat,
+			check: func(t *testing.T, s workoutStep) {
+				if s.stepType != "interval" {
+					t.Errorf("stepType = %q, want interval", s.stepType)
+				}
+				if s.exerciseName != "BENCH_PRESS/BARBELL_BENCH_PRESS" {
+					t.Errorf("exerciseName = %q, want BENCH_PRESS/BARBELL_BENCH_PRESS", s.exerciseName)
+				}
+				if s.endConditionType != "reps" {
+					t.Errorf("endConditionType = %q, want reps", s.endConditionType)
+				}
+				if s.endConditionValue != 10 {
+					t.Errorf("endConditionValue = %v, want 10", s.endConditionValue)
+				}
+				if s.targetType != "weight" {
+					t.Errorf("targetType = %q, want weight", s.targetType)
+				}
+				if s.targetValueOne != 20 {
+					t.Errorf("targetValueOne = %v, want 20", s.targetValueOne)
+				}
+			},
+		},
+		{
+			name:    "invalid exercise without catalog",
+			input:   "BENCH_PRESS/BARBELL_BENCH_PRESS:10reps",
+			unit:    "km",
+			catalog: nil,
+			wantErr: true,
+		},
+		{
+			name:    "invalid exercise name in catalog",
+			input:   "BENCH_PRESS/INVALID_EX:10reps",
+			unit:    "km",
+			catalog: mockCat,
+			wantErr: true,
+		},
+		{
+			name:    "invalid weight target",
+			input:   "run:5min@weight:-5kg",
+			unit:    "km",
+			wantErr: true,
 		},
 		{
 			name:    "invalid type",
@@ -378,11 +438,11 @@ func TestParseStep(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseStep(tt.input, tt.unit)
+			got, err := parseStep(tt.input, tt.unit, tt.catalog)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("parseStep(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 			}
-			if tt.check != nil && err == nil {
+			if !tt.wantErr && tt.check != nil {
 				tt.check(t, got)
 			}
 		})

@@ -400,10 +400,11 @@ gccli workouts create "Easy 30min Run" --type run \
   --step "cooldown:5min" \
   --unit mi
 
-# Strength workout (no targets)
+# Strength workout with specific exercises, reps, and weights
+# Tip: Use `gccli exercises list` to find valid exercise names
 gccli workouts create "Full Body" --type strength \
   --step "warmup:5min" \
-  --step "run:30min" \
+  --step "repeat:3:BENCH_PRESS/BARBELL_BENCH_PRESS:10reps@weight:60kg+rest:1min30s" \
   --step "cooldown:5min"
 
 # Track workout with repetitions and distance

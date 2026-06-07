@@ -30,10 +30,11 @@ type workoutStep struct {
 	steps      []workoutStep
 
 	stepType          string
-	endConditionType  string // "time" or "distance"
-	endConditionValue float64 // seconds or meters
-	targetType        string  // "pace", "hr", "power", "cadence", or "" for no target
-	targetValueOne    float64 // higher/faster value
+	exerciseName      string  // for strength workouts (e.g., BENCH_PRESS/BARBELL_BENCH_PRESS)
+	endConditionType  string  // "time", "distance", or "reps"
+	endConditionValue float64 // seconds, meters, or rep count
+	targetType        string  // "pace", "hr", "power", "cadence", "weight", or "" for no target
+	targetValueOne    float64 // higher/faster value, or weight
 	targetValueTwo    float64 // lower/slower value
 }
 
@@ -80,8 +81,8 @@ var targetTypeMap = map[string]struct {
 // mixedTimeRegexp matches mixed time like "1min30s" or "30seg".
 var mixedTimeRegexp = regexp.MustCompile(`^(?:(\d+)min)?(?:(\d+)(?:s|seg))$`)
 
-// singleUnitRegexp matches single units like "1km", "400m", "5mi", "5min".
-var singleUnitRegexp = regexp.MustCompile(`^([0-9.]+)(km|mi|m|mt|mts|min)$`)
+// singleUnitRegexp matches single units like "1km", "400m", "5mi", "5min", "10reps".
+var singleUnitRegexp = regexp.MustCompile(`^([0-9.]+)(km|mi|m|mt|mts|min|reps)$`)
 
 // paceRegexp matches pace like "5:30".
 var paceRegexp = regexp.MustCompile(`^(\d+):(\d{2})$`)
@@ -92,7 +93,18 @@ func (c *WorkoutCreateCmd) Run(g *Globals) error {
 		return err
 	}
 
-	steps, err := parseSteps(c.Steps, c.Unit)
+	var catalog *exerciseCatalog
+	if c.Type == "strength" {
+		data, err := fetchExerciseCatalogFn(g.Context)
+		if err == nil {
+			var cat exerciseCatalog
+			if err := json.Unmarshal(data, &cat); err == nil {
+				catalog = &cat
+			}
+		}
+	}
+
+	steps, err := parseSteps(c.Steps, c.Unit, catalog)
 	if err != nil {
 		return err
 	}
@@ -123,10 +135,10 @@ func (c *WorkoutCreateCmd) Run(g *Globals) error {
 	return nil
 }
 
-func parseSteps(raw []string, unit string) ([]workoutStep, error) {
+func parseSteps(raw []string, unit string, catalog *exerciseCatalog) ([]workoutStep, error) {
 	steps := make([]workoutStep, 0, len(raw))
 	for _, s := range raw {
-		step, err := parseStep(s, unit)
+		step, err := parseStep(s, unit, catalog)
 		if err != nil {
 			return nil, err
 		}
@@ -135,7 +147,7 @@ func parseSteps(raw []string, unit string) ([]workoutStep, error) {
 	return steps, nil
 }
 
-func parseStep(s string, unit string) (workoutStep, error) {
+func parseStep(s string, unit string, catalog *exerciseCatalog) (workoutStep, error) {
 	if strings.HasPrefix(s, "repeat:") {
 		parts := strings.SplitN(s, ":", 3)
 		if len(parts) != 3 {
@@ -149,7 +161,7 @@ func parseStep(s string, unit string) (workoutStep, error) {
 		innerStepStrs := strings.Split(parts[2], "+")
 		var innerSteps []workoutStep
 		for _, is := range innerStepStrs {
-			inner, err := parseStep(is, unit)
+			inner, err := parseStep(is, unit, catalog)
 			if err != nil {
 				return workoutStep{}, fmt.Errorf("in repeat: %w", err)
 			}
@@ -179,8 +191,30 @@ func parseStep(s string, unit string) (workoutStep, error) {
 		return workoutStep{}, fmt.Errorf("invalid step %q: expected type:duration[@target:values]", s)
 	}
 
+	var exerciseName string
 	if _, ok := stepTypeMap[typeName]; !ok {
-		return workoutStep{}, fmt.Errorf("invalid step type %q: expected warmup, run, interval, cooldown, recovery, rest, or other", typeName)
+		// Not a standard type. If catalog is provided, validate as an exercise.
+		if catalog == nil {
+			return workoutStep{}, fmt.Errorf("invalid step type %q: expected warmup, run, interval, cooldown, recovery, rest, or other", typeName)
+		}
+
+		exParts := strings.SplitN(typeName, "/", 2)
+		if len(exParts) != 2 {
+			return workoutStep{}, fmt.Errorf("invalid exercise format %q: expected CATEGORY/NAME", typeName)
+		}
+		catName := strings.ToUpper(exParts[0])
+		exName := strings.ToUpper(exParts[1])
+
+		cat, ok := catalog.Categories[catName]
+		if !ok {
+			return workoutStep{}, fmt.Errorf("invalid exercise category %q in %q", catName, typeName)
+		}
+		if _, ok := cat.Exercises[exName]; !ok {
+			return workoutStep{}, fmt.Errorf("invalid exercise name %q in category %q", exName, catName)
+		}
+
+		exerciseName = typeName
+		typeName = "interval" // Fallback to interval for the actual stepType
 	}
 
 	condType, condVal, err := parseCondition(durStr)
@@ -190,6 +224,7 @@ func parseStep(s string, unit string) (workoutStep, error) {
 
 	step := workoutStep{
 		stepType:          typeName,
+		exerciseName:      exerciseName,
 		endConditionType:  condType,
 		endConditionValue: condVal,
 	}
@@ -200,27 +235,36 @@ func parseStep(s string, unit string) (workoutStep, error) {
 			return workoutStep{}, fmt.Errorf("invalid step %q: target requires values after ':'", s)
 		}
 
-		if _, ok := targetTypeMap[targetName]; !ok {
-			return workoutStep{}, fmt.Errorf("invalid target type %q: expected pace, hr, power, or cadence", targetName)
-		}
-
-		step.targetType = targetName
-
-		switch targetName {
-		case "pace":
-			high, low, err := parsePaceRange(values, unit)
-			if err != nil {
-				return workoutStep{}, fmt.Errorf("invalid step %q: %w", s, err)
+		if targetName == "weight" {
+			weightStr := strings.TrimSuffix(values, "kg")
+			weightVal, err := strconv.ParseFloat(weightStr, 64)
+			if err != nil || weightVal <= 0 {
+				return workoutStep{}, fmt.Errorf("invalid weight value %q", values)
 			}
-			step.targetValueOne = high
-			step.targetValueTwo = low
-		default:
-			low, high, err := parseNumericRange(values)
-			if err != nil {
-				return workoutStep{}, fmt.Errorf("invalid step %q: %w", s, err)
+			step.targetType = "weight"
+			step.targetValueOne = weightVal
+		} else {
+			if _, ok := targetTypeMap[targetName]; !ok {
+				return workoutStep{}, fmt.Errorf("invalid target type %q: expected pace, hr, power, cadence, or weight", targetName)
 			}
-			step.targetValueOne = low
-			step.targetValueTwo = high
+			step.targetType = targetName
+
+			switch targetName {
+			case "pace":
+				high, low, err := parsePaceRange(values, unit)
+				if err != nil {
+					return workoutStep{}, fmt.Errorf("invalid step %q: %w", s, err)
+				}
+				step.targetValueOne = high
+				step.targetValueTwo = low
+			default:
+				low, high, err := parseNumericRange(values)
+				if err != nil {
+					return workoutStep{}, fmt.Errorf("invalid step %q: %w", s, err)
+				}
+				step.targetValueOne = low
+				step.targetValueTwo = high
+			}
 		}
 	}
 
@@ -268,10 +312,12 @@ func parseCondition(s string) (string, float64, error) {
 			return "distance", v, nil
 		case "min":
 			return "time", v * 60.0, nil
+		case "reps":
+			return "reps", v, nil
 		}
 	}
 
-	return "", 0, fmt.Errorf("invalid condition %q: expected format like 1km, 400m, 5mi, 5min, 1m30s", s)
+	return "", 0, fmt.Errorf("invalid condition %q: expected format like 1km, 400m, 5mi, 5min, 1min30s, 10reps", s)
 }
 
 // parseNumericRange parses "140-160" into (140.0, 160.0).
@@ -449,9 +495,24 @@ func buildExecutableStep(s workoutStep, order int) (map[string]any, error) {
 			"conditionTypeId":  3,
 			"conditionTypeKey": "distance",
 		}
+	} else if s.endConditionType == "reps" {
+		step["endCondition"] = map[string]any{
+			"conditionTypeId":  10,
+			"conditionTypeKey": "reps",
+		}
 	}
 
-	if s.targetType != "" {
+	if s.exerciseName != "" {
+		step["exerciseName"] = s.exerciseName
+	}
+
+	if s.targetType == "weight" {
+		step["weightValue"] = s.targetValueOne
+		step["targetType"] = map[string]any{
+			"workoutTargetTypeId":  1,
+			"workoutTargetTypeKey": "no.target",
+		}
+	} else if s.targetType != "" {
 		tt := targetTypeMap[s.targetType]
 		step["targetType"] = map[string]any{
 			"workoutTargetTypeId":  tt.id,
